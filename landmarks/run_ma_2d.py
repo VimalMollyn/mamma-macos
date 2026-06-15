@@ -120,15 +120,30 @@ def process_data(frame_source, detector, device, model, cfg, out_folder, save_ca
     if os.path.exists(f"{out_folder}/{camera_id}.npz"):
         logger.info(f"skipping {camera_id}: output file already exists")
         return
-    for body_id in people_ids:
-        body_verts = []
-        body_vis = []
-        body_contact = []
-        body_floor_contact = []
-        folder_path = f"{out_folder}/{camera_id}/body_{body_id:02d}"
-        for frame_n in tqdm.tqdm(range(n_frames)):
-            # FrameSource gives RGB; cv2/downstream expects BGR.
-            img = cv2.cvtColor(frame_source.read_rgb(frame_n), cv2.COLOR_RGB2BGR)
+    # Per-body accumulators (filled in frame order). We iterate frames in the
+    # OUTER loop and bodies in the inner loop so each frame is decoded once per
+    # camera instead of once per person. Rebinding the per-body list names at
+    # the top of the body loop keeps the inner block byte-identical to the
+    # previous body-major code.
+    body_verts_by_id = {bid: [] for bid in people_ids}
+    body_vis_by_id = {bid: [] for bid in people_ids}
+    body_contact_by_id = {bid: [] for bid in people_ids}
+    body_floor_contact_by_id = {bid: [] for bid in people_ids}
+    folder_paths = {bid: f"{out_folder}/{camera_id}/body_{bid:02d}" for bid in people_ids}
+
+    for frame_n in tqdm.tqdm(range(n_frames)):
+        # FrameSource gives RGB; cv2/downstream expects BGR. Decode once here
+        # and reuse for every body on this frame.
+        frame_bgr = cv2.cvtColor(frame_source.read_rgb(frame_n), cv2.COLOR_RGB2BGR)
+        for body_id in people_ids:
+            folder_path = folder_paths[body_id]
+            body_verts = body_verts_by_id[body_id]
+            body_vis = body_vis_by_id[body_id]
+            body_contact = body_contact_by_id[body_id]
+            body_floor_contact = body_floor_contact_by_id[body_id]
+            # Per-body copy preserves the previous per-body array semantics; the
+            # copy is negligible next to HEVC decode + model inference.
+            img = frame_bgr.copy()
             if masks_path is None:
                 det_out = detector(img)
                 det_instances = det_out['instances']
@@ -279,10 +294,12 @@ def process_data(frame_source, detector, device, model, cfg, out_folder, save_ca
                 os.makedirs(folder_path, exist_ok=True)
                 cv2.imwrite(f"{folder_path}/img_{frame_n:04d}.jpg", pred_img)
 
-        all_verts.append(np.array(body_verts).squeeze(1))
-        all_vis.append(np.array(body_vis).squeeze(1))
-        all_contact.append(np.array(body_contact).squeeze(1))
-        all_floor_contact.append(np.array(body_floor_contact).squeeze(1))
+    # Stack per-body results in people_ids order (matches the previous layout).
+    for body_id in people_ids:
+        all_verts.append(np.array(body_verts_by_id[body_id]).squeeze(1))
+        all_vis.append(np.array(body_vis_by_id[body_id]).squeeze(1))
+        all_contact.append(np.array(body_contact_by_id[body_id]).squeeze(1))
+        all_floor_contact.append(np.array(body_floor_contact_by_id[body_id]).squeeze(1))
 
         # Preview MP4 is optional and only meaningful when frames were
         # actually written above (``save_cam_output=True``, gated by
@@ -293,6 +310,7 @@ def process_data(frame_source, detector, device, model, cfg, out_folder, save_ca
         # on common no-preview runs. Format matches the .jpg writes
         # above (was .png — silent ffmpeg failure on every call).
         if save_cam_output:
+            folder_path = folder_paths[body_id]
             create_video_from_images(folder_path, f"{folder_path}/{camera_id}.mp4", img_format="img_%04d.jpg")
 
     landmarks = np.stack(all_verts, axis=1)
