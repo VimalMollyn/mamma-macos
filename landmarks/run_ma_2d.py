@@ -141,9 +141,8 @@ def process_data(frame_source, detector, device, model, cfg, out_folder, save_ca
             body_vis = body_vis_by_id[body_id]
             body_contact = body_contact_by_id[body_id]
             body_floor_contact = body_floor_contact_by_id[body_id]
-            # Per-body copy preserves the previous per-body array semantics; the
-            # copy is negligible next to HEVC decode + model inference.
-            img = frame_bgr.copy()
+            # Avoid an extra full-frame copy per body; downstream code does not mutate `frame_bgr`.
+            img = frame_bgr
             if masks_path is None:
                 det_out = detector(img)
                 det_instances = det_out['instances']
