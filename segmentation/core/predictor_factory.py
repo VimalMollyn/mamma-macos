@@ -174,6 +174,95 @@ def _patch_sam2_sdpa_dtype():
     logger.info("Applied SAM2 scaled_dot_product_attention mixed-dtype monkey-patch (MPS/CPU).")
 
 
+def _patch_efficienttam_png_support():
+    """PNG + frame-filter monkey-patch for EfficientTAM's frame loader.
+
+    EfficientTAM's ``utils.misc.load_video_frames_from_jpg_images`` is
+    JPEG-only and ignores the start/end frame filter — same limitation the
+    SAM2 patch fixes. EfficientTAM's loader signature is identical to SAM2's,
+    so this mirrors :func:`_patch_sam2_png_support` against the EfficientTAM
+    module.
+    """
+    try:
+        import efficient_track_anything.utils.misc as etam_misc  # type: ignore
+    except ImportError:
+        logger.warning("efficient_track_anything.utils.misc not found; skipping PNG patch.")
+        return
+    if getattr(etam_misc, "_png_patch_applied", False):
+        return
+    if not hasattr(etam_misc, "load_video_frames_from_jpg_images"):
+        return
+
+    import os
+    import torch
+    import numpy as np
+    from PIL import Image
+    from tqdm import tqdm
+
+    def _load_img_as_tensor(img_path, image_size):
+        img_pil = Image.open(img_path)
+        img_np = np.array(img_pil.convert("RGB").resize((image_size, image_size)))
+        if img_np.dtype == np.uint8:
+            img_np = img_np / 255.0
+        else:
+            raise RuntimeError(f"Unknown image dtype: {img_np.dtype} on {img_path}")
+        img = torch.from_numpy(img_np).permute(2, 0, 1)
+        video_width, video_height = img_pil.size
+        return img, video_height, video_width
+
+    def patched_load_video_frames_from_jpg_images(
+        video_path,
+        image_size,
+        offload_video_to_cpu,
+        img_mean=(0.485, 0.456, 0.406),
+        img_std=(0.229, 0.224, 0.225),
+        async_loading_frames=False,
+        compute_device=torch.device("cuda"),
+    ):
+        if not (isinstance(video_path, str) and os.path.isdir(video_path)):
+            raise NotImplementedError(
+                "Only image frames in a folder are supported. "
+                "Use ffmpeg to extract frames from video files."
+            )
+        frame_names = [
+            p for p in os.listdir(video_path)
+            if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG"]
+        ]
+        try:
+            frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+        except ValueError:
+            frame_names.sort()
+        if _frame_name_filter is not None:
+            frame_names = [f for f in frame_names if f in _frame_name_filter]
+        num_frames = len(frame_names)
+        if num_frames == 0:
+            raise RuntimeError(f"no images found in {video_path}")
+        img_paths = [os.path.join(video_path, f) for f in frame_names]
+        img_mean_t = torch.tensor(img_mean, dtype=torch.float32)[:, None, None]
+        img_std_t = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
+
+        if async_loading_frames:
+            lazy_images = etam_misc.AsyncVideoFrameLoader(
+                img_paths, image_size, offload_video_to_cpu, img_mean_t, img_std_t, compute_device,
+            )
+            return lazy_images, lazy_images.video_height, lazy_images.video_width
+
+        images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float32)
+        for n, img_path in enumerate(tqdm(img_paths, desc="frame loading (JPEG/PNG)")):
+            images[n], video_height, video_width = _load_img_as_tensor(img_path, image_size)
+        if not offload_video_to_cpu:
+            images = images.to(compute_device)
+            img_mean_t = img_mean_t.to(compute_device)
+            img_std_t = img_std_t.to(compute_device)
+        images -= img_mean_t
+        images /= img_std_t
+        return images, video_height, video_width
+
+    etam_misc.load_video_frames_from_jpg_images = patched_load_video_frames_from_jpg_images
+    etam_misc._png_patch_applied = True
+    logger.info("Applied EfficientTAM PNG/sorting/frame-filter monkey-patch to efficient_track_anything.utils.misc.")
+
+
 def _patch_sam3_png_support():
     """
     Monkey-patch sam3.model.utils.sam2_utils to support PNG images and robust
@@ -679,6 +768,25 @@ def build_video_predictor(sam_version: str, config: str | None, checkpoint: str 
             _patch_sam2_sdpa_dtype()
         from sam2.build_sam import build_sam2_video_predictor  # type: ignore
         return build_sam2_video_predictor(config, checkpoint, device=device)
+
+    elif sam_version.startswith("efficienttam"):
+        # EfficientTAM: a lighter SAM2-compatible video predictor (vanilla ViT
+        # encoder). Much faster on Apple GPU than SAM2 Hiera (e.g. ti @1024 is
+        # ~9x the encoder throughput on MPS). `config` is the EfficientTAM
+        # hydra config name; `checkpoint` the local .pt path.
+        from efficient_track_anything.build_efficienttam import (  # type: ignore
+            build_efficienttam_video_predictor,
+        )
+        _patch_efficienttam_png_support()
+        if getattr(device, "type", str(device)) != "cuda":
+            _patch_sam2_sdpa_dtype()  # same bf16-memory vs fp32-attn issue on MPS
+        return build_efficienttam_video_predictor(
+            config,
+            checkpoint,
+            device=device,
+            # torch.compile of the image encoder is unsupported on MPS.
+            hydra_overrides_extra=["++model.compile_image_encoder=False"],
+        )
 
     elif sam_version == "sam3":
         _patch_sam3_png_support()

@@ -410,9 +410,20 @@ def process_seq(
     _log("INFO", f"Init camera: {cam_init}, {n_cameras} cameras total")
 
     # --- Build pipeline ---
-    cfg = SAM2_CFG if sam_version == "sam2" else SAM3_CFG
-    ckpt = sam_checkpoint or (SAM2_CKPT if sam_version == "sam2" else SAM3_CKPT)
-    if sam_version == "sam3_prompt":
+    if sam_version.startswith("efficienttam"):
+        # EfficientTAM variant (e.g. efficienttam_ti, efficienttam_s_512x512).
+        # Config name mirrors the variant; checkpoint defaults to the repo's
+        # data/weights/efficienttam/<variant>.pt (anchored to repo root so it
+        # resolves regardless of cwd) unless --sam_checkpoint overrides it.
+        cfg = f"configs/efficienttam/{sam_version}.yaml"
+        _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ckpt = sam_checkpoint or os.environ.get("MAMMA_ETAM_CHECKPOINT") or os.path.join(
+            _repo, "data", "weights", "efficienttam", f"{sam_version}.pt"
+        )
+    elif sam_version == "sam2":
+        cfg = SAM2_CFG
+        ckpt = sam_checkpoint or SAM2_CKPT
+    else:  # sam3 / sam3_prompt
         cfg = SAM3_CFG
         ckpt = sam_checkpoint or SAM3_CKPT
 

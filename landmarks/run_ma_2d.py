@@ -69,6 +69,10 @@ def recursive_to(x: Any, target: torch.device):
     if isinstance(x, dict):
         return {k: recursive_to(v, target) for k, v in x.items()}
     elif isinstance(x, torch.Tensor):
+        # MPS has no float64; downcast so batches with double tensors (e.g.
+        # mask-derived boxes) can move to the Apple GPU instead of erroring.
+        if x.dtype == torch.float64 and getattr(target, "type", str(target)) == "mps":
+            x = x.to(torch.float32)
         return x.to(target)
     elif isinstance(x, list):
         return [recursive_to(i, target) for i in x]

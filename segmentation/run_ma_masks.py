@@ -92,9 +92,14 @@ SAM backends:
                              '(from --calibration) before SAM / YOLO. Default off.')
 
     # --- SAM backend ---
-    parser.add_argument('--sam_version', default='sam2', choices=['sam2', 'sam3', 'sam3_prompt'],
+    parser.add_argument('--sam_version', default='sam2',
+                        choices=['sam2', 'sam3', 'sam3_prompt',
+                                 'efficienttam_ti', 'efficienttam_s',
+                                 'efficienttam_ti_512x512', 'efficienttam_s_512x512'],
                         help='SAM backend: sam2 (default), sam3 (tracker API), '
-                             'or sam3_prompt (text prompt "person" — no YOLO needed for init camera)')
+                             'sam3_prompt (text prompt "person" — no YOLO needed for init camera), '
+                             'or an efficienttam_* variant (lighter SAM2-compatible model, '
+                             'much faster on Apple GPU / MPS)')
     parser.add_argument('--sam_checkpoint', default=None,
                         help='Override SAM checkpoint path or HuggingFace model ID')
     parser.add_argument('--yolo-checkpoint', '--yolo_checkpoint',

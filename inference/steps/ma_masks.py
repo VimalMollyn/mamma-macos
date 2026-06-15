@@ -58,6 +58,14 @@ class MaMasksBuilder(StepBuilder):
             argv += ["--dataset_name", self.dataset_name]
         argv += self.flags
 
+        # Optional env override of the SAM backend (e.g. MAMMA_MA_MASKS_SAM_VERSION
+        # = efficienttam_ti on macOS for a lighter, ~2x-faster mask model).
+        # Appended last so it wins over the preset's --sam_version, since the
+        # subprocess argparse honors the final occurrence.
+        sam_override = os.environ.get("MAMMA_MA_MASKS_SAM_VERSION")
+        if sam_override:
+            argv += ["--sam_version", sam_override]
+
         # Translate per-installation paths from env -> argv.
         missing: List[str] = []
         for env_key, flag in _REQUIRED_ENV_FLAGS:
@@ -90,7 +98,9 @@ class MaMasksBuilder(StepBuilder):
         #      (~/.cache/huggingface/hub/), so the subprocess doesn't
         #      need a path from the runner.
         if not _preset_supplies_sam_checkpoint(self.flags):
-            sam_version = _resolve_sam_version(self.flags)
+            # The env override (if set) wins over the preset, matching the argv
+            # appended above; otherwise read the preset flags.
+            sam_version = sam_override or _resolve_sam_version(self.flags)
             if sam_version == "sam2":
                 sam2_value = os.environ.get(_MA_MASKS_SAM2_ENV_KEY)
                 if sam2_value:
