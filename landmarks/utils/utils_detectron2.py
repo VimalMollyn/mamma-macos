@@ -67,7 +67,10 @@ class DefaultPredictor_Lazy:
             self.aug = mapper.augmentations
             self.input_format = mapper.image_format
 
-        self.model.eval().cuda()
+        # detectron2's compiled ops (nms, roi_align) ship CUDA + CPU kernels
+        # but no MPS kernels, so fall back to CPU rather than MPS off-CUDA.
+        det2_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model.eval().to(det2_device)
         if test_dataset:
             self.metadata = MetadataCatalog.get(test_dataset)
         assert self.input_format in ["RGB", "BGR"], self.input_format

@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import subprocess
+import shutil
 import glob
 import argparse
 
@@ -22,7 +23,9 @@ def create_video_from_images(images_folder, output_path, extension="png",
 
     # Define the FFmpeg command
     ffmpeg_command = [
-        "/usr/bin/ffmpeg",
+        # Resolve from PATH so this works on macOS (Homebrew ffmpeg) too,
+        # not just a Linux /usr/bin layout.
+        shutil.which("ffmpeg") or "ffmpeg",
         "-r", f"{frame_rate}",  # Input framerate
         "-f", "concat",
         "-safe", "0",

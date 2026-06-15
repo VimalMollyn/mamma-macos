@@ -1,5 +1,10 @@
 import os
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
+import sys
+# pyrender needs an OpenGL backend chosen before it is imported. EGL is the
+# headless Linux/cluster path; macOS has no EGL (it uses its native CGL
+# backend), so only force EGL off-Mac and honor any backend already set.
+if sys.platform != "darwin":
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 import numpy as np
 import pyrender
 import trimesh

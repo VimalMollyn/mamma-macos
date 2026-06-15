@@ -145,6 +145,35 @@ def _patch_sam2_png_support():
     logger.info("Applied SAM2 PNG/sorting monkey-patch to sam2.utils.misc.")
 
 
+def _patch_sam2_sdpa_dtype():
+    """Make scaled_dot_product_attention tolerant of mixed dtypes (MPS/CPU).
+
+    SAM2 stores memory-bank features as bfloat16 (a CUDA memory optimization
+    that pairs with CUDA's bf16 autocast — see SAM2VideoPredictor where
+    ``maskmem_features.to(torch.bfloat16)`` is unconditional). On MPS/CPU there
+    is no autocast, so the float32 current-frame query/key meet the bf16 memory
+    ``value`` in memory attention and torch raises:
+        "Expected query, key, and value to have the same dtype".
+    Upcast the offending inputs to the query dtype. This is a no-op when all
+    three already match (the CUDA path), so behavior there is unchanged.
+    """
+    import torch.nn.functional as F
+
+    if getattr(F, "_sam2_sdpa_dtype_patch", False):
+        return
+    _orig_sdpa = F.scaled_dot_product_attention
+
+    def _sdpa(query, key, value, *args, **kwargs):
+        if not (query.dtype == key.dtype == value.dtype):
+            key = key.to(query.dtype)
+            value = value.to(query.dtype)
+        return _orig_sdpa(query, key, value, *args, **kwargs)
+
+    F.scaled_dot_product_attention = _sdpa
+    F._sam2_sdpa_dtype_patch = True
+    logger.info("Applied SAM2 scaled_dot_product_attention mixed-dtype monkey-patch (MPS/CPU).")
+
+
 def _patch_sam3_png_support():
     """
     Monkey-patch sam3.model.utils.sam2_utils to support PNG images and robust
@@ -288,9 +317,16 @@ def _patch_sam3_png_support():
         for n, img_path in enumerate(tqdm(img_paths, desc="frame loading (image folder, patched)")):
             images[n], video_height, video_width = _load_img_as_tensor(img_path, image_size)
         if not offload_video_to_cpu:
-            images = images.cuda()
-            img_mean_t = img_mean_t.cuda()
-            img_std_t = img_std_t.cuda()
+            # Respect the available accelerator instead of hardcoding CUDA, so
+            # this loader also works on MPS (Apple Silicon) / CPU-only hosts.
+            dev = (
+                "cuda" if torch.cuda.is_available()
+                else "mps" if torch.backends.mps.is_available()
+                else "cpu"
+            )
+            images = images.to(dev)
+            img_mean_t = img_mean_t.to(dev)
+            img_std_t = img_std_t.to(dev)
         images -= img_mean_t
         images /= img_std_t
         return images, video_height, video_width
@@ -636,6 +672,11 @@ def build_video_predictor(sam_version: str, config: str | None, checkpoint: str 
     """
     if sam_version == "sam2":
         _patch_sam2_png_support()
+        # On non-CUDA devices (MPS/CPU) there is no bf16 autocast, so SAM2's
+        # bf16 memory-bank features mismatch float32 attention inputs. Keep the
+        # CUDA path byte-for-byte unchanged.
+        if getattr(device, "type", str(device)) != "cuda":
+            _patch_sam2_sdpa_dtype()
         from sam2.build_sam import build_sam2_video_predictor  # type: ignore
         return build_sam2_video_predictor(config, checkpoint, device=device)
 

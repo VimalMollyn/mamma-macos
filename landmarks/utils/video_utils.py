@@ -10,6 +10,7 @@ def create_video_from_images(images_folder, output_path, img_format="img_%04d.jp
     when ffmpeg itself errors out (logged with ffmpeg's stderr so the
     real failure is visible, not just the Python wrapper exit code).
     """
+    import shutil
     import subprocess
 
     input_path = os.path.join(images_folder, img_format)
@@ -25,7 +26,9 @@ def create_video_from_images(images_folder, output_path, img_format="img_%04d.jp
         return False
 
     ffmpeg_command = [
-        "/usr/bin/ffmpeg",
+        # Resolve from PATH so this works on macOS (Homebrew ffmpeg) too,
+        # not just a Linux /usr/bin layout.
+        shutil.which("ffmpeg") or "ffmpeg",
         "-framerate", "30",
         "-i", input_path,
         "-vf", "scale=iw:ih",

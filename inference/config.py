@@ -50,7 +50,7 @@ from typing import List
 
 from .runner import ALL_STEPS
 
-VALID_ENGINES = ("conda", "apptainer", "docker")
+VALID_ENGINES = ("conda", "local", "apptainer", "docker")
 
 _YAML_SUFFIXES = (".yaml", ".yml")
 _JSON_SUFFIXES = (".json",)
@@ -514,7 +514,7 @@ def validate(cfg: dict) -> None:
             continue
         enabled_count += 1
 
-        engine = (s.get("engine") or "conda").lower()
+        engine = (os.environ.get("MAMMA_ENGINE") or s.get("engine") or "conda").lower()
         if engine not in VALID_ENGINES:
             errors.append(
                 f"{step}.engine: {engine!r} not in {VALID_ENGINES}"

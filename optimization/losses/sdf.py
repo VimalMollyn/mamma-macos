@@ -4,10 +4,30 @@ np.random.seed(0)
 import os
 import glob
 import torch
-from pytorch_sdf import sdf
 
 
 torch.set_default_dtype(torch.float32)
+
+
+def _load_sdf_backend():
+    """Import ``pytorch_sdf`` lazily, with a clear error if it's missing.
+
+    ``pytorch_sdf`` ships CUDA kernels and is only exercised by the SDF-based
+    contact/penetration loss (active when ``--part-mesh`` points at .ply
+    files). Importing it at module load would break CPU/MPS-only installs
+    (e.g. macOS, no CUDA toolkit) that never use that loss, so we defer it to
+    first use.
+    """
+    try:
+        from pytorch_sdf import sdf
+    except ImportError as exc:  # pragma: no cover - platform dependent
+        raise ImportError(
+            "pytorch_sdf is required for the SDF contact/penetration loss but "
+            "is not installed (it builds CUDA kernels and is unavailable on "
+            "non-CUDA platforms). Run without the SDF loss — leave --part-mesh "
+            "unset — or install pytorch_sdf on a CUDA host."
+        ) from exc
+    return sdf
 
 
 def get_3d_bbox(vertices,):
@@ -41,7 +61,10 @@ class MultiSDF:
         self.part_meshes = None
         self.total_sdf = None
         self.source_mesh = None
-        self.sdf = sdf.SDF(distance_method=distance_method).sdf_with_winding_numbers
+        # Built lazily on first SDF evaluation so MultiSDF can be constructed
+        # (and ma_3d can run without the SDF loss) on hosts lacking pytorch_sdf.
+        self._sdf_fn = None
+        self._sdf_unavailable = False  # set once if pytorch_sdf can't be imported
         self.face_masks = {}
         self.sdf_part_params = {}
         self.max_batch_size = max_batch_size
@@ -49,7 +72,35 @@ class MultiSDF:
         self.mesh_faces = np.load("smplx_simplified_face_idx.npy").astype(np.int32)
 
 
+    def _ensure_sdf(self):
+        """Return the pytorch_sdf evaluator, or ``None`` if it's unavailable.
+
+        Deferred so importing/instantiating MultiSDF never requires the
+        CUDA-only ``pytorch_sdf`` package. When it can't be imported (e.g. on
+        macOS / any non-CUDA host) we disable the SDF contact/penetration term
+        gracefully — returning ``None`` so callers skip it — instead of
+        crashing the whole ma_3d optimization over an optional refinement loss.
+        """
+        if self._sdf_fn is None and not self._sdf_unavailable:
+            try:
+                self._sdf_fn = _load_sdf_backend().SDF(
+                    distance_method=self.distance_method
+                ).sdf_with_winding_numbers
+            except ImportError as exc:
+                self._sdf_unavailable = True
+                print(f"[MultiSDF] SDF contact/penetration loss disabled: {exc}")
+        return self._sdf_fn
+
+    @property
+    def sdf(self):
+        """The pytorch_sdf winding-number evaluator, built on first use."""
+        return self._ensure_sdf()
+
+
     def multi_people_sdf_loss(self, bodies_vertices, bodies_sampled_verts=None, bodies_contacts=None, ignore_fist_t_frames=10, weight=1.):
+        if self._ensure_sdf() is None:
+            # pytorch_sdf unavailable (non-CUDA host) — skip this term.
+            return weight * torch.tensor(0.0, device=bodies_vertices[0].device)
         total_loss = torch.tensor(0.0).to(bodies_vertices[0].device)
         min_batch_size = self.max_batch_size
 
@@ -174,6 +225,9 @@ class MultiSDF:
 
 
     def batch_multi_sdf_loss(self, source_verts_batch, weight=1.):
+        if self._ensure_sdf() is None:
+            # pytorch_sdf unavailable (non-CUDA host) — skip this term.
+            return weight * torch.tensor(0.0, device=source_verts_batch.device)
         total_loss = torch.tensor(0.0, device=source_verts_batch.device, requires_grad=True)
         source_verts_np = source_verts_batch.detach().cpu().numpy()
         self._create_fixed_mesh(source_verts_np[-1])

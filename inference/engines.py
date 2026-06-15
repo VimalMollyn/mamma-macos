@@ -19,6 +19,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import List, Optional
@@ -140,6 +141,30 @@ def run_conda(
             err_f.close()
 
 
+def run_local(
+    builder: StepBuilder,
+    seq_name: str,
+    out_path: str,
+    err_path: str,
+) -> int:
+    """``python <argv>`` in the *current* interpreter's environment.
+
+    No conda, no container — the step runs in whatever venv is already
+    active (``sys.executable``). Used on machines without conda (e.g. a
+    macOS uv venv); select it by setting ``MAMMA_ENGINE=local``.
+    """
+    argv = builder.build_argv(seq_name)
+    cmd = [sys.executable, *argv]
+    out_f, err_f = _open_logs(out_path, err_path)
+    try:
+        return _run(cmd, builder.host_cwd(), out_f, err_f)
+    finally:
+        if out_f:
+            out_f.close()
+        if err_f:
+            err_f.close()
+
+
 def run_apptainer(
     builder: StepBuilder,
     seq_name: str,
@@ -216,6 +241,7 @@ def run_docker(
 
 ENGINES = {
     "conda": run_conda,
+    "local": run_local,
     "apptainer": run_apptainer,
     "docker": run_docker,
 }

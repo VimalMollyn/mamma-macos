@@ -48,8 +48,9 @@ DEFAULT_FPS = 30
 
 
 # The renderer needs an OpenGL backend; on Linux we default to EGL so it
-# can run headless. On macOS/Windows pyrender picks the right thing itself.
-if platform.system() != "Windows":
+# can run headless. On macOS/Windows pyrender picks the right thing itself
+# (macOS has no EGL — it uses its native CGL backend via pyglet).
+if platform.system() not in ("Windows", "Darwin"):
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 

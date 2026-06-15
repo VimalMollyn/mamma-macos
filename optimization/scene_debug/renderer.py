@@ -3,9 +3,11 @@ import os
 import platform
 
 # Set OpenGL backend before importing pyrender so cluster jobs can override it
-# via environment variables (e.g., PYOPENGL_PLATFORM=osmesa).
-# if 'PYOPENGL_PLATFORM' not in os.environ:
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
+# via environment variables (e.g., PYOPENGL_PLATFORM=osmesa). EGL is the
+# headless Linux/cluster backend; macOS has no EGL (it uses its native CGL
+# backend), so only force EGL off-Mac and honor any pre-set value.
+if platform.system() != "Darwin":
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 import numpy as np
 import pyrender

@@ -539,6 +539,13 @@ def main(optim_cfg_fn, cam_names, metadata_data_pth:str, imgs_pth:str, paths: Pa
          save_detection_analysis: bool = True,
          detection_analysis_top_k: int = 30, cli_args=None):
 
+    # Fall back to CPU when CUDA is unavailable (e.g. macOS). MPS is not an
+    # option here: the optimization uses float64 tensors, which MPS doesn't
+    # support. This local override propagates to every device= call below.
+    if device == "cuda" and not torch.cuda.is_available():
+        print("CUDA unavailable; running ma_3d on CPU.")
+        device = "cpu"
+
     if smplx_model_pth is None:
         smplx_model_pth = paths.smplx_lockhead_models
 

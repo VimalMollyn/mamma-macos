@@ -70,8 +70,15 @@ class StepBuilder:
 
     @property
     def engine(self) -> str:
-        # Per-step override; default conda.
-        return (self.step_cfg.get("engine") or "conda").lower()
+        # An explicit MAMMA_ENGINE in the environment wins over the per-step
+        # value so a single toggle retargets every step — e.g.
+        # ``MAMMA_ENGINE=local`` to run in the active venv on a machine
+        # without conda. Otherwise: per-step override → default conda.
+        return (
+            os.environ.get("MAMMA_ENGINE")
+            or self.step_cfg.get("engine")
+            or "conda"
+        ).lower()
 
     @property
     def conda_env(self) -> str:

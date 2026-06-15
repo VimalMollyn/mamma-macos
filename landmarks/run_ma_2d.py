@@ -542,12 +542,17 @@ def main(args, out_folder, masks_folder, img_folder=None):
     set_random_seed(seed, deterministic=cfg.deterministic)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info(torch.cuda.get_device_properties(device))
+    # get_device_properties() is CUDA-only and asserts on CPU/MPS hosts.
+    if torch.cuda.is_available():
+        logger.info(torch.cuda.get_device_properties(device))
+    else:
+        logger.info(f"Using device: {device} (CUDA unavailable)")
 
     model = build_model(cfg).to(device)
 
     logger.info(f"loading weights from: {args.weights}")
-    model.load_state_dict(torch.load(args.weights)['state_dict'])
+    # map_location=device so a CUDA-saved checkpoint loads on CPU/MPS hosts.
+    model.load_state_dict(torch.load(args.weights, map_location=device)['state_dict'])
     model.eval()
 
     # Resolve relative to this script (landmarks/) so the detector config
