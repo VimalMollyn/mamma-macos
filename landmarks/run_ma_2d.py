@@ -541,12 +541,19 @@ def main(args, out_folder, masks_folder, img_folder=None):
     seed = init_random_seed(cfg.seed)
     set_random_seed(seed, deterministic=cfg.deterministic)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # get_device_properties() is CUDA-only and asserts on CPU/MPS hosts.
+    # Prefer CUDA, then Apple MPS (the MammaNet ViT forward is much faster on
+    # the Apple GPU than on CPU), else CPU. The detectron2 detector stays on
+    # CPU (no MPS kernels) — see utils_detectron2 — but the per-frame landmark
+    # model runs here on `device`.
     if torch.cuda.is_available():
+        device = torch.device('cuda')
         logger.info(torch.cuda.get_device_properties(device))
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+        logger.info("Using device: mps (Apple GPU)")
     else:
-        logger.info(f"Using device: {device} (CUDA unavailable)")
+        device = torch.device('cpu')
+        logger.info("Using device: cpu (no CUDA/MPS)")
 
     model = build_model(cfg).to(device)
 
