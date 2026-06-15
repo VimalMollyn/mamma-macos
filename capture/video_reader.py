@@ -15,6 +15,7 @@ Usage::
 """
 import logging
 import os
+import threading
 from typing import Any, Dict
 
 import numpy as np
@@ -23,10 +24,24 @@ logger = logging.getLogger(__name__)
 
 
 class VideoFrameReader:
-    """Random-access frame reader for MP4 videos. No disk I/O for frames.
+    """Frame reader for MP4 videos. No disk I/O for frames.
 
-    Each ``read_*`` call opens a cv2.VideoCapture, seeks, reads one frame, and
-    closes. Simple and thread-safe, though slower than keeping the capture open.
+    Supports reading any frame index in any order, but is optimized for the
+    common in-order (forward) access pattern. Keeps a single persistent
+    ``cv2.VideoCapture`` and decodes **forward**: when the requested frame is at
+    or after the current position it reads sequentially (no seek), and only
+    seeks when asked for an earlier frame. For 4K H.264/H.265 with a large GOP
+    this avoids the per-frame seek-from-keyframe re-decode that made sequential
+    access quadratic. Out-of-order / backward reads still work, paying a seek.
+
+    Frames returned are byte-identical to the previous open/seek/read/close
+    implementation: same decoder, same color order (BGR), same dtype.
+
+    Thread-safe: the persistent capture and its position cursor are guarded by
+    an internal lock, so concurrent callers (e.g. the SAM3 mask-export thread
+    pool) are serialized at the decode boundary while their per-frame work still
+    runs in parallel. The lock is uncontended for the common single-threaded
+    forward scan, so that path keeps the full sequential-decode speedup.
     """
 
     def __init__(self, video_path: str, start: int = None, end: int = None):
@@ -46,6 +61,13 @@ class VideoFrameReader:
         self.start = max(0, min(start or 0, total))
         self.end = max(self.start, min(end or total, total))
         self.n_frames = self.end - self.start
+        # Persistent capture for sequential forward decode. Lazily opened on the
+        # first read; ``_cap_pos`` is the global index of the NEXT frame the
+        # capture will return (one past the last decoded frame). ``_lock``
+        # serializes access to both so the reader stays thread-safe.
+        self._cap = None
+        self._cap_pos = -1
+        self._lock = threading.Lock()
         logger.info(
             "VideoFrameReader: '%s' frames [%d:%d] (%d of %d frames, %dx%d, %.1f fps)",
             os.path.basename(video_path), self.start, self.end,
@@ -55,20 +77,64 @@ class VideoFrameReader:
     def __len__(self) -> int:
         return self.n_frames
 
+    def _ensure_cap(self):
+        """Open the persistent capture if needed. Caller must hold ``_lock``."""
+        import cv2
+
+        if self._cap is None:
+            self._cap = cv2.VideoCapture(self.video_path)
+            if not self._cap.isOpened():
+                raise RuntimeError(f"Cannot open video: {self.video_path}")
+            self._cap_pos = 0
+        return self._cap
+
     def read_bgr(self, local_idx: int) -> np.ndarray:
-        """Read frame as BGR numpy array (cv2 convention)."""
+        """Read frame as BGR numpy array (cv2 convention).
+
+        Decodes forward from the persistent capture; seeks only when the
+        requested global index is behind the current cursor. Thread-safe.
+        """
         import cv2
 
         if local_idx < 0 or local_idx >= self.n_frames:
             raise IndexError(f"Frame index {local_idx} out of range [0, {self.n_frames})")
         global_idx = self.start + local_idx
-        cap = cv2.VideoCapture(self.video_path)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, global_idx)
-        ret, frame = cap.read()
-        cap.release()
-        if not ret:
-            raise RuntimeError(f"Failed to read frame {global_idx} from '{self.video_path}'")
-        return frame
+
+        with self._lock:
+            cap = self._ensure_cap()
+
+            # Seek only when going backward (or cursor unknown). Forward access
+            # reads sequentially, skipping intervening frames without a seek.
+            if global_idx < self._cap_pos:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, global_idx)
+                self._cap_pos = global_idx
+            elif global_idx > self._cap_pos:
+                # Skip-decode forward to the target (grab() decodes without copy).
+                while self._cap_pos < global_idx:
+                    if not cap.grab():
+                        raise RuntimeError(
+                            f"Failed to advance to frame {global_idx} in '{self.video_path}'")
+                    self._cap_pos += 1
+
+            ret, frame = cap.read()
+            if not ret:
+                raise RuntimeError(f"Failed to read frame {global_idx} from '{self.video_path}'")
+            self._cap_pos += 1
+            return frame
+
+    def close(self):
+        """Release the persistent capture, if open."""
+        with self._lock:
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+                self._cap_pos = -1
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def read_rgb(self, local_idx: int) -> np.ndarray:
         """Read frame as RGB numpy array."""
